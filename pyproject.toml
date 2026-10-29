@@ -1,0 +1,15 @@
+[project]
+name = "seller-profit-guard"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.11"]
+xlsx = ["openpyxl>=3.1,<4"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120

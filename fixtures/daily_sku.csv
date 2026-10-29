@@ -1,0 +1,4 @@
+date,sku,units,gross_sales,returns,fees,logistics,ad_spend,ad_sales,cogs,stock,avg_daily_units
+2026-10-27,SKU-ALPHA,10,10000,500,1500,800,700,9000,4000,35,5
+2026-10-28,SKU-ALPHA,8,8000,0,1200,600,500,5000,3200,30,5
+2026-10-28,SKU-BETA,4,6000,0,900,300,400,, ,12,2

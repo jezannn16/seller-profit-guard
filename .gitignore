@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.sqlite3
+*.sqlite
+*.db
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.local
+/data/
+/imports/
+/exports/
+/backups/
+export.csv
