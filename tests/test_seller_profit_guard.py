@@ -1,4 +1,8 @@
+import json
+import subprocess
+import sys
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -109,3 +113,31 @@ def test_telegram_delivery_requires_credentials(tmp_path):
         assert "TELEGRAM_BOT_TOKEN" in str(exc)
     else:
         raise AssertionError("missing token must fail")
+
+
+def test_cli_preview_import_dashboard_and_export_on_synthetic_fixture(tmp_path):
+    project = Path(__file__).resolve().parents[1]
+    database = tmp_path / "cli.sqlite3"
+
+    def cli(*args):
+        return subprocess.run(
+            [sys.executable, "seller_profit_guard.py", *args],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    preview_result = json.loads(cli("preview", "fixtures/daily_sku.csv"))
+    assert (preview_result["valid_rows"], preview_result["rejected_rows"]) == (3, 0)
+
+    imported = json.loads(cli("--db", str(database), "import", "fixtures/daily_sku.csv"))
+    assert imported == {"duplicate_batch": False, "accepted": 3, "rejected": 0}
+
+    dashboard_result = json.loads(cli("--db", str(database), "dashboard"))
+    alpha = next(row for row in dashboard_result if row["sku"] == "SKU-ALPHA")
+    assert alpha["metrics"]["contribution_margin"] == "5000"
+
+    exported = tmp_path / "export.csv"
+    cli("--db", str(database), "export", str(exported))
+    assert exported.read_text(encoding="utf-8").count("SKU-") == 3

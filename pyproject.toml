@@ -7,9 +7,15 @@ requires-python = ">=3.11"
 dev = ["pytest>=8", "ruff>=0.11"]
 xlsx = ["openpyxl>=3.1,<4"]
 
+[project.scripts]
+seller-profit-guard = "seller_profit_guard:main"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
+
+[tool.setuptools]
+py-modules = ["seller_profit_guard"]

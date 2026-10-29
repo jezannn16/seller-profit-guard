@@ -1,53 +1,91 @@
 # Seller Profit Guard
 
-CSV-first marketplace SKU economics. This MVP has no seller account connection and does not change prices, ads, stock or listings. All money is parsed and calculated with `Decimal`.
+![Seller Profit Guard — CSV-first SKU economics banner with a spreadsheet preview, cost fields, and a protective shield.](assets/banner.svg)
 
-## Implemented
+**A CSV-first SKU economics ledger.** Import seller reports into a local SQLite database, calculate contribution margin and ad metrics with decimal arithmetic, and preview inventory or performance alerts.
 
-- CSV preview (and optional XLSX preview when `openpyxl` is installed) with header mapping by case-insensitive column names, row-level validation errors, repeated-row detection, and a 20 MiB file ceiling.
-- Idempotent re-import of an identical file using SHA-256; date+SKU primary key prevents overwriting previous imports. Import batches record accepted/rejected counts.
-- Daily SKU analytics: gross sales, returns, net sales, marketplace fees, logistics, ad spend, COGS and contribution margin. Margin stays unknown when any required cost/return input is missing. If ad-attributed sales are supplied, dashboard also calculates ROAS and ACoS.
-- Inventory cover estimate from latest stock / average daily sales; alert dry-run, cooldown log and explicit Telegram delivery with a delivery log.
-- CSV export and a synthetic fixture with hand-checkable expected values.
+[![CI](https://github.com/jezannn16/seller-profit-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/jezannn16/seller-profit-guard/actions/workflows/ci.yml)
 
-## CSV format
+[Features](#what-it-does) · [Quick start](#quick-start) · [CSV format and formulas](#input-format) · [Telegram](#optional-telegram-delivery) · [Tests](#tests-and-ci) · [Data and scope](#data-and-scope)
 
-Required columns: `date` (ISO `YYYY-MM-DD`), `sku`, `units`, `gross_sales`. Optional columns: `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, `avg_daily_units`. Empty returns or cost values are marked unknown; contribution margin is reported only when returns and all cost columns are supplied. ROAS and ACoS remain unknown without ad-attributed sales. One row per day and SKU.
+## What it does
+
+| Area | Available now |
+| --- | --- |
+| Import | Preview and import CSV; optional XLSX support with `openpyxl` |
+| Validation | Map case-insensitive headers; report invalid and duplicate date/SKU rows |
+| Economics | Calculate net sales, contribution margin, ROAS, and ACoS when inputs are complete |
+| Inventory | Estimate days of cover from supplied stock and average daily units |
+| Alerts | Dry-run by default; optional local cooldown log or explicit Telegram delivery |
+| Storage | Append-only daily SKU rows in local SQLite; no marketplace account connection |
+
+Missing cost or returns inputs remain unknown where they affect a metric. The tool does not infer profit from revenue.
 
 ## Quick start
 
+Requires Python 3.11 or newer.
+
 ```sh
-python3 -m venv .venv && . .venv/bin/activate
-python -m pip install pytest ruff
-# Optional XLSX reader:
-python -m pip install openpyxl
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[dev]'
+# Optional, for XLSX input:
+python -m pip install -e '.[xlsx]'
+```
+
+Run the included synthetic example:
+
+```sh
 python seller_profit_guard.py preview fixtures/daily_sku.csv
-python seller_profit_guard.py --db seller.sqlite3 import fixtures/daily_sku.csv
-python seller_profit_guard.py --db seller.sqlite3 dashboard
-python seller_profit_guard.py --db seller.sqlite3 alerts --min-margin 1000 --min-stock-days 7 --min-roas 3 --max-acos 0.35
-python seller_profit_guard.py --db seller.sqlite3 export export.csv
-pytest -q
+python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 import fixtures/daily_sku.csv
+python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 dashboard
+python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 alerts \
+  --min-margin 6000 --min-stock-days 7 --min-roas 10
 ```
 
-Telegram alerts are sent only when the user explicitly runs `alerts --send-telegram`. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from a private shell or secret manager. The sender has a 10-second timeout and never retries non-idempotent sendMessage calls; ambiguous failures are logged as `unknown` and cooldown-suppressed to reduce duplicate delivery. `--commit-log` only records local preview entries and sends nothing.
+The fixture has three rows. SKU-ALPHA has 17,500 net sales and 5,000 contribution margin; its ROAS uses supplied ad-attributed sales. SKU-BETA has unknown margin and ROAS because COGS and attributed ad sales are missing. Alerts print as dry-run and send nothing.
 
-Example using the placeholders in `.env.example` after replacing them locally:
+## Input format
+
+One row per date and SKU. Required columns: `date` (`YYYY-MM-DD`), `sku`, `units`, and `gross_sales`. Optional columns: `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, and `avg_daily_units`. Monetary amounts accept decimal commas or dots. Rows with missing required cost inputs keep contribution margin unknown; missing `ad_sales` keeps ROAS and ACoS unknown.
+
+The formulas and assumptions are:
+
+```text
+net sales            = gross sales - returns
+contribution margin  = net sales - fees - logistics - ad spend - COGS
+ROAS                 = ad-attributed sales / ad spend
+ACoS                 = ad spend / ad-attributed sales
+inventory cover      = latest stock / latest average daily units
+```
+
+Taxes, storage, payment costs, discounts, and other expenses must be included in an appropriate input before interpreting contribution margin. Inventory cover is a point-in-time estimate, not a demand forecast.
+
+## Tests and CI
 
 ```sh
-set -a; . .env; set +a
-python seller_profit_guard.py --db seller.sqlite3 alerts --min-margin 1000 --min-stock-days 7 --send-telegram
+pytest -q
+ruff check .
 ```
 
-## Formulas and assumptions
+Tests include the synthetic CSV fixture, real CLI subprocess runs with a temporary database, duplicate import handling, alert dry-run behavior, and XLSX parsing when the optional dependency is installed. They make no marketplace or Telegram requests.
 
-- `net sales = gross sales − returns`.
-- `contribution margin = net sales − fees − logistics − ad spend − COGS` only when returns and each cost field are present for every included row.
-- `ROAS = ad-attributed sales / ad spend`; `ACoS = ad spend / ad-attributed sales`. General gross sales are never substituted for ad-attributed sales.
-- Revenue is not profit. Taxes, storage, payment fees, discounts and other costs must be included in fees/logistics or added before interpreting margin.
-- Inventory cover is a rough point-in-time estimate `latest stock / latest average daily units`; it does not model inbound shipments or demand variability.
+## Optional Telegram delivery
 
-## Limitations / planned
+Telegram delivery is a real external message. It requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in a local `.env` file or secret manager; `.env` is ignored by Git. Never commit or paste credential values. Review the generated alert text and choose a private test chat before using `--send-telegram`:
 
-CSV is built in; XLSX support is optional through `openpyxl`. Separate returns/ad reports, UI dashboard and marketplace API sync are not implemented. Marketplace credentials were not available, so neither WB nor Ozon was selected. Alert mode is dry-run by default; explicit Telegram delivery requires credentials. Imports are append-only; overlapping date+SKU rows are rejected and do not overwrite history. CSV data is stored locally without encryption.
+```sh
+cp .env.example .env
+# Edit .env locally with your bot token and destination chat ID.
+set -a; . .env; set +a
+python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 alerts \
+  --min-margin 6000 --min-stock-days 7 --send-telegram
+```
 
-See [demo steps](docs/demo.md) for a synthetic end-to-end walkthrough. Official references for a future adapter: [Wildberries API token lifecycle](https://seller.wildberries.ru/instructions/ru/tj/material/how-to-create-update-or-delete-a-wb-api-token?recommended=true) and [Ozon Seller API documentation](https://docs.ozon.ru/global/api/). Neither adapter was selected because seller access credentials were unavailable.
+Sending is opt-in, uses one request per alert, and does not automatically retry ambiguous failures. `--commit-log` writes local cooldown entries and does not send messages. This repository has no Telegram live-send test.
+
+## Data and scope
+
+There is no Wildberries or Ozon API adapter, marketplace synchronization, price editing, ad management, or stock updates. CSV data is stored locally and unencrypted; avoid sensitive exports in shared directories. Identical file imports are idempotent, while overlapping date/SKU rows are rejected rather than overwritten.
+
+See [demo steps](docs/demo.md) and the [synthetic CSV fixture](fixtures/daily_sku.csv).
