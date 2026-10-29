@@ -81,6 +81,8 @@ def _validate_rows(fieldnames: list[str], records) -> tuple[list[dict[str, str]]
                 value = money(item.get(key), key, key in REQUIRED)
                 if value is not None and key in ("units", "returns", "stock", "avg_daily_units") and value < 0:
                     raise ValueError(f"{key} cannot be negative")
+                if value is not None and key in ("gross_sales", "fees", "logistics", "ad_spend", "ad_sales", "cogs") and value < 0:
+                    raise ValueError(f"{key} cannot be negative")
                 if key == "returns" and value is not None and value > money(item["gross_sales"], "gross_sales", True):
                     raise ValueError("returns cannot exceed gross_sales")
             normalized.append(item)
@@ -209,6 +211,7 @@ class Metrics:
     gross_sales: Decimal
     returns: Decimal
     net_sales: Decimal | None
+    return_rate: Decimal | None
     fees: Decimal
     logistics: Decimal
     ad_spend: Decimal
@@ -233,6 +236,7 @@ def calculate(rows: list[sqlite3.Row]) -> Metrics:
     for row in rows:
         missing.update(x for x in (row["missing_fields"] or "").split(",") if x)
     net = None if "returns" in missing else gross - returns
+    return_rate = None if "returns" in missing or gross == 0 else returns / gross
     cogs = None if "cogs" in missing else total("cogs")
     ad_sales = None if any(r["ad_sales"] is None for r in rows) else total("ad_sales")
     roas = None if ad_sales is None or ads == 0 else ad_sales / ads
@@ -242,7 +246,9 @@ def calculate(rows: list[sqlite3.Row]) -> Metrics:
         if (cogs is None or net is None or missing & {"fees", "logistics", "ad_spend"})
         else net - fees - logistics - ads - cogs
     )
-    return Metrics(gross, returns, net, fees, logistics, ads, ad_sales, roas, acos, cogs, margin, margin is not None)
+    return Metrics(
+        gross, returns, net, return_rate, fees, logistics, ads, ad_sales, roas, acos, cogs, margin, margin is not None
+    )
 
 
 def dashboard(db: sqlite3.Connection) -> list[dict[str, object]]:

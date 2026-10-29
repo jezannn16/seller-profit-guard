@@ -25,11 +25,25 @@ def test_known_margin_and_missing_costs(tmp_path):
     m = calculate(rows)
     assert m.gross_sales == Decimal(18000)
     assert m.net_sales == Decimal(17500)
+    assert m.return_rate == Decimal(500) / Decimal(18000)
     assert m.contribution_margin == Decimal(5000)
     assert m.roas == Decimal(14000) / Decimal(1200)
     assert m.acos == Decimal(1200) / Decimal(14000)
     beta = calculate(db.execute("select * from daily_sku where sku='SKU-BETA'").fetchall())
     assert beta.contribution_margin is None and not beta.margin_complete
+
+
+def test_zero_sales_has_no_divide_by_zero_return_rate(tmp_path):
+    db = connect(tmp_path / "seller.db")
+    path = tmp_path / "zero.csv"
+    path.write_text(
+        "date,sku,units,gross_sales,returns,fees,logistics,ad_spend,cogs\n"
+        "2026-10-28,SKU-ZERO,0,0,0,0,0,0,0\n",
+        encoding="utf-8",
+    )
+    import_csv(db, path)
+    metric = calculate(db.execute("select * from daily_sku where sku='SKU-ZERO'").fetchall())
+    assert metric.net_sales == 0 and metric.return_rate is None
 
 
 def test_import_is_idempotent_duplicate_rows_rejected(tmp_path):
@@ -56,6 +70,21 @@ def test_row_level_errors_cover_bad_date_negative_stock_and_duplicate(tmp_path):
     assert "date" in errors[0]["error"]
     assert "negative" in errors[1]["error"]
     assert "duplicate" in errors[2]["error"]
+
+
+@pytest.mark.parametrize("column,value", [("gross_sales", "-100"), ("fees", "-1"), ("ad_spend", "-2"), ("cogs", "-3")])
+def test_negative_revenue_and_cost_inputs_are_rejected(tmp_path, column, value):
+    headers = ["date", "sku", "units", "gross_sales", "fees", "ad_spend", "cogs"]
+    row = ["2026-10-28", "SKU-X", "1", "100", "0", "0", "0"]
+    row[headers.index(column)] = value
+    path = tmp_path / "negative.csv"
+    path.write_text(",".join(headers) + "\n" + ",".join(row) + "\n", encoding="utf-8")
+
+    rows, errors = parse_csv(path)
+
+    assert not rows
+    assert len(errors) == 1
+    assert f"{column} cannot be negative" in errors[0]["error"]
 
 
 def test_xlsx_import_when_optional_dependency_is_available(tmp_path):

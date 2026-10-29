@@ -13,8 +13,8 @@
 | Area | Available now |
 | --- | --- |
 | Import | Preview and import CSV; optional XLSX support with `openpyxl` |
-| Validation | Map case-insensitive headers; report invalid and duplicate date/SKU rows |
-| Economics | Calculate net sales, contribution margin, ROAS, and ACoS when inputs are complete |
+| Validation | Map case-insensitive headers; reject negative sales, costs, inventory, and duplicate date/SKU rows |
+| Economics | Calculate net sales, return rate, contribution margin, ROAS, and ACoS when inputs are complete |
 | Inventory | Estimate days of cover from supplied stock and average daily units |
 | Alerts | Dry-run by default; optional local cooldown log or explicit Telegram delivery |
 | Storage | Append-only daily SKU rows in local SQLite; no marketplace account connection |
@@ -54,6 +54,7 @@ The formulas and assumptions are:
 ```text
 net sales            = gross sales - returns
 contribution margin  = net sales - fees - logistics - ad spend - COGS
+return rate          = returns / gross sales (unknown when returns are missing or gross sales are zero)
 ROAS                 = ad-attributed sales / ad spend
 ACoS                 = ad spend / ad-attributed sales
 inventory cover      = latest stock / latest average daily units
