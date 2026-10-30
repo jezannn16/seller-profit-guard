@@ -399,7 +399,7 @@ def _conflicting_order_ids(db: sqlite3.Connection, rows: list[dict[str, str]]) -
 
 def import_csv(
     db: sqlite3.Connection, path: str | Path, column_map: dict[str, str] | None = None
-) -> dict[str, int | bool]:
+) -> dict[str, int | bool | list[dict[str, object]]]:
     raw = Path(path).read_bytes()
     normalized_map = {
         canonical.strip().casefold(): source.strip().casefold() for canonical, source in (column_map or {}).items()
@@ -407,7 +407,7 @@ def import_csv(
     mapping_bytes = json.dumps(normalized_map, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(raw + b"\0" + mapping_bytes).hexdigest()
     if db.execute("SELECT 1 FROM import_batches WHERE content_hash=?", (digest,)).fetchone():
-        return {"duplicate_batch": True, "accepted": 0, "rejected": 0}
+        return {"duplicate_batch": True, "accepted": 0, "rejected": 0, "errors": []}
     rows, errors = parse_file(path, column_map)
     bad_orders = _conflicting_order_ids(db, rows)
     daily_groups, aggregation_errors = _aggregate_import_rows(rows)
@@ -439,7 +439,7 @@ def _persist_import_batch(
     digest: str,
     errors: list[dict],
     daily_groups: list[tuple[dict, list[dict]]],
-) -> dict[str, int | bool]:
+) -> dict[str, int | bool | list[dict[str, object]]]:
     cur = db.execute(
         "INSERT INTO import_batches(source,content_hash,imported_at,accepted,rejected) VALUES(?,?,?,?,?)",
         (str(path), digest, datetime.now(UTC).isoformat(timespec="seconds"), 0, len(errors)),
@@ -487,7 +487,13 @@ def _persist_import_batch(
                 for source in source_rows
             )
     db.execute("UPDATE import_batches SET accepted=?,rejected=? WHERE id=?", (accepted, len(errors), batch))
-    result = {"duplicate_batch": False, "accepted": accepted, "rejected": len(errors)}
+    # Report only line identifiers and reasons here. Invalid rows can contain
+    # personal or commercial data; callers can inspect their local source file.
+    public_errors = [
+        {key: error[key] for key in ("line", "line_key", "error") if key in error}
+        for error in errors
+    ]
+    result = {"duplicate_batch": False, "accepted": accepted, "rejected": len(errors), "errors": public_errors}
     db.execute("RELEASE SAVEPOINT import_batch")
     return result
 

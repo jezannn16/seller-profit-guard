@@ -54,6 +54,8 @@ Imports also populate normalized local facts: product first/last observed dates,
 
 CSV preview and import report rows with extra fields as row-level errors (with the source line number) and continue processing valid rows. This commonly catches stray delimiters or a report row whose column count differs from its header. Missing optional trailing cells remain empty; missing required values are reported by normal field validation.
 
+The `import` command prints a JSON result containing accepted/rejected counts and per-row error line numbers/reasons, including conflicts detected against earlier imports. Error output omits row contents so terminal logs do not copy potentially sensitive seller data; use `preview FILE` to inspect source values locally before importing.
+
 The formulas and assumptions are:
 
 ```text

@@ -254,6 +254,10 @@ def test_csv_extra_fields_are_reported_per_row_and_valid_rows_still_imported(tmp
     result = import_csv(db, path)
     assert result["accepted"] == 2
     assert result["rejected"] == 1
+    assert result["errors"] == [{
+        "line": 3,
+        "error": "row has 1 extra field(s) beyond the 4 headers",
+    }]
     assert [row[0] for row in db.execute("SELECT sku FROM daily_sku ORDER BY sku")] == [
         "SKU-ALSO-GOOD", "SKU-GOOD",
     ]
@@ -440,7 +444,21 @@ def test_cli_preview_import_dashboard_and_export_on_synthetic_fixture(tmp_path):
     assert "_source_row" not in preview_result["sample"][0]
 
     imported = json.loads(cli("--db", str(database), "import", "fixtures/daily_sku.csv"))
-    assert imported == {"duplicate_batch": False, "accepted": 3, "rejected": 0}
+    assert imported == {"duplicate_batch": False, "accepted": 3, "rejected": 0, "errors": []}
+
+    ragged = tmp_path / "ragged.csv"
+    ragged.write_text(
+        "date,sku,units,gross_sales\n"
+        "2026-10-28,CLI-GOOD,1,100\n"
+        "2026-10-28,CLI-BAD,1,50,unexpected\n",
+        encoding="utf-8",
+    )
+    ragged_result = json.loads(cli("--db", str(tmp_path / "ragged.sqlite3"), "import", str(ragged)))
+    assert ragged_result["accepted"] == 1 and ragged_result["rejected"] == 1
+    assert ragged_result["errors"] == [{
+        "line": 3,
+        "error": "row has 1 extra field(s) beyond the 4 headers",
+    }]
 
     dashboard_result = json.loads(cli("--db", str(database), "dashboard"))
     alpha = next(row for row in dashboard_result if row["sku"] == "SKU-ALPHA")
