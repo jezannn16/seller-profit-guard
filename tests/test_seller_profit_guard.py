@@ -231,6 +231,35 @@ def test_row_level_errors_cover_bad_date_negative_stock_and_duplicate(tmp_path):
     assert "duplicate" in errors[2]["error"]
 
 
+def test_csv_extra_fields_are_reported_per_row_and_valid_rows_still_imported(tmp_path):
+    path = tmp_path / "ragged.csv"
+    path.write_text(
+        "date,sku,units,gross_sales\n"
+        "2026-10-28,SKU-GOOD,2,1200\n"
+        "2026-10-28,SKU-BAD,1,500,unexpected\n"
+        "2026-10-28,SKU-ALSO-GOOD,1,300\n",
+        encoding="utf-8",
+    )
+
+    preview_result = seller_module.preview(path)
+
+    assert preview_result["valid_rows"] == 2
+    assert preview_result["rejected_rows"] == 1
+    assert preview_result["errors"] == [{
+        "line": 3,
+        "error": "row has 1 extra field(s) beyond the 4 headers",
+    }]
+
+    db = connect(tmp_path / "ragged.db")
+    result = import_csv(db, path)
+    assert result["accepted"] == 2
+    assert result["rejected"] == 1
+    assert [row[0] for row in db.execute("SELECT sku FROM daily_sku ORDER BY sku")] == [
+        "SKU-ALSO-GOOD", "SKU-GOOD",
+    ]
+    assert db.execute("SELECT accepted,rejected FROM import_batches").fetchone()[:] == (2, 1)
+
+
 def test_ambiguous_duplicate_headers_fail_before_mapping(tmp_path):
     path = tmp_path / "ambiguous.csv"
     path.write_text(

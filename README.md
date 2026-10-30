@@ -52,6 +52,8 @@ For aggregated reports, use one row per date and SKU. Required columns: `date` (
 
 Imports also populate normalized local facts: product first/last observed dates, return amount, ad spend/attributed sales, marketplace fees, logistics costs, and inventory snapshots. These are recorded only when their corresponding source cells are present. `facts` prints counts by model. Older databases are upgraded additively and backfilled from existing `daily_sku` rows only where the stored `missing_fields` and values show that a fact was observed. Order and order-item tables remain empty for legacy aggregated reports because order identities cannot be recovered from daily SKU totals.
 
+CSV preview and import report rows with extra fields as row-level errors (with the source line number) and continue processing valid rows. This commonly catches stray delimiters or a report row whose column count differs from its header. Missing optional trailing cells remain empty; missing required values are reported by normal field validation.
+
 The formulas and assumptions are:
 
 ```text

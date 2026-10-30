@@ -162,6 +162,16 @@ def _validate_rows(
     normalized = []
     errors = []
     for line, row in enumerate(records, 2):
+        # DictReader stores fields beyond the header under the None key. Treat
+        # malformed records as row-level errors so one bad line does not abort
+        # preview or discard otherwise usable rows in the same batch.
+        extra_values = row.get(None)
+        if extra_values:
+            errors.append({
+                "line": line,
+                "error": f"row has {len(extra_values)} extra field(s) beyond the {len(fieldnames)} headers",
+            })
+            continue
         item = {key: (row.get(original) or "").strip() for key, original in mapping.items()}
         item["_source_row"] = str(line)
         try:
