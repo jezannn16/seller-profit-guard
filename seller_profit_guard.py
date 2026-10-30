@@ -69,8 +69,32 @@ def money(value: str | None, field: str, required: bool = False) -> Decimal | No
     return result
 
 
-def _validate_rows(fieldnames: list[str], records) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
-    mapping = {name.strip().lower(): name for name in fieldnames if name}
+def parse_column_mappings(values: list[str] | None) -> dict[str, str]:
+    mappings: dict[str, str] = {}
+    allowed = set(NUMERIC) | {"date", "sku"}
+    for value in values or []:
+        canonical, separator, source = value.partition("=")
+        canonical, source = canonical.strip().lower(), source.strip()
+        if not separator or canonical not in allowed or not source:
+            raise ValueError("Column mapping must be canonical=source-header (for example gross_sales=Sales)")
+        if canonical in mappings:
+            raise ValueError(f"Column {canonical} is mapped more than once")
+        mappings[canonical] = source
+    return mappings
+
+
+def _validate_rows(
+    fieldnames: list[str], records, column_map: dict[str, str] | None = None
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+    source_headers = {name.strip().casefold(): name for name in fieldnames if name}
+    mapping = {key: source_headers[key.casefold()] for key in (set(NUMERIC) | {"date", "sku"}) if key.casefold() in source_headers}
+    for canonical, source in (column_map or {}).items():
+        actual = source_headers.get(source.casefold())
+        if actual is None:
+            raise ValueError(f"Mapped source header not found: {source}")
+        mapping[canonical] = actual
+    if len(set(mapping.values())) != len(mapping):
+        raise ValueError("Each source header can map to only one canonical column")
     missing = REQUIRED - set(mapping)
     if missing:
         raise ValueError("Missing required columns: " + ", ".join(sorted(missing)))
@@ -108,17 +132,21 @@ def _validate_rows(fieldnames: list[str], records) -> tuple[list[dict[str, str]]
     return unique, errors + duplicates
 
 
-def parse_csv(path: str | Path) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+def parse_csv(
+    path: str | Path, column_map: dict[str, str] | None = None
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
     raw = Path(path).read_bytes()
     if len(raw) > 20 * 1024 * 1024:
         raise ValueError("File exceeds 20 MiB")
     reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))
     if not reader.fieldnames:
         raise ValueError("CSV needs a header row")
-    return _validate_rows(reader.fieldnames, reader)
+    return _validate_rows(reader.fieldnames, reader, column_map)
 
 
-def parse_xlsx(path: str | Path) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+def parse_xlsx(
+    path: str | Path, column_map: dict[str, str] | None = None
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
     file_path = Path(path)
     if file_path.stat().st_size > 20 * 1024 * 1024:
         raise ValueError("File exceeds 20 MiB")
@@ -147,22 +175,24 @@ def parse_xlsx(path: str | Path) -> tuple[list[dict[str, str]], list[dict[str, o
                     values[name] = "" if value is None else str(value)
                 yield values
 
-        return _validate_rows(names, records())
+        return _validate_rows(names, records(), column_map)
     finally:
         workbook.close()
 
 
-def parse_file(path: str | Path) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+def parse_file(
+    path: str | Path, column_map: dict[str, str] | None = None
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
     suffix = Path(path).suffix.lower()
     if suffix == ".csv":
-        return parse_csv(path)
+        return parse_csv(path, column_map)
     if suffix == ".xlsx":
-        return parse_xlsx(path)
+        return parse_xlsx(path, column_map)
     raise ValueError("Supported import formats are .csv and .xlsx")
 
 
-def preview(path: str | Path) -> dict[str, object]:
-    rows, errors = parse_file(path)
+def preview(path: str | Path, column_map: dict[str, str] | None = None) -> dict[str, object]:
+    rows, errors = parse_file(path, column_map)
     return {
         "file": str(path),
         "valid_rows": len(rows),
@@ -172,12 +202,15 @@ def preview(path: str | Path) -> dict[str, object]:
     }
 
 
-def import_csv(db: sqlite3.Connection, path: str | Path) -> dict[str, int | bool]:
+def import_csv(
+    db: sqlite3.Connection, path: str | Path, column_map: dict[str, str] | None = None
+) -> dict[str, int | bool]:
     raw = Path(path).read_bytes()
-    digest = hashlib.sha256(raw).hexdigest()
+    mapping_bytes = json.dumps(column_map or {}, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(raw + b"\0" + mapping_bytes).hexdigest()
     if db.execute("SELECT 1 FROM import_batches WHERE content_hash=?", (digest,)).fetchone():
         return {"duplicate_batch": True, "accepted": 0, "rejected": 0}
-    rows, errors = parse_file(path)
+    rows, errors = parse_file(path, column_map)
     cur = db.execute(
         "INSERT INTO import_batches(source,content_hash,imported_at,accepted,rejected) VALUES(?,?,?,?,?)",
         (str(path), digest, datetime.now(UTC).isoformat(timespec="seconds"), len(rows), len(errors)),
@@ -423,9 +456,12 @@ def main() -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     x = sub.add_parser("preview")
     x.add_argument("file")
+    x.add_argument("--map", dest="mappings", action="append", default=[], metavar="CANONICAL=HEADER")
     x = sub.add_parser("import")
     x.add_argument("file")
+    x.add_argument("--map", dest="mappings", action="append", default=[], metavar="CANONICAL=HEADER")
     sub.add_parser("dashboard")
+    sub.add_parser("imports")
     x = sub.add_parser("alerts")
     x.add_argument("--min-margin", default="0")
     x.add_argument("--min-stock-days", default="7")
@@ -439,12 +475,16 @@ def main() -> int:
     args = p.parse_args()
     try:
         if args.cmd == "preview":
-            print(json.dumps(preview(args.file), ensure_ascii=False, indent=2))
+            print(json.dumps(preview(args.file, parse_column_mappings(args.mappings)), ensure_ascii=False, indent=2))
             return 0
         db = connect(args.db)
         if args.cmd == "import":
-            print(json.dumps(import_csv(db, args.file)))
+            print(json.dumps(import_csv(db, args.file, parse_column_mappings(args.mappings))))
             db.commit()
+        elif args.cmd == "imports":
+            print(json.dumps([dict(row) for row in db.execute(
+                "SELECT id,source,imported_at,accepted,rejected FROM import_batches ORDER BY id DESC"
+            )], ensure_ascii=False, indent=2))
         elif args.cmd == "dashboard":
             print(json.dumps([serializable(x) for x in dashboard(db)], indent=2))
         elif args.cmd == "alerts":

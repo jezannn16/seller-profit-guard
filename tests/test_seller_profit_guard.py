@@ -16,6 +16,7 @@ from seller_profit_guard import (
     evaluate_alerts,
     export_csv,
     import_csv,
+    parse_column_mappings,
     parse_csv,
     parse_xlsx,
     send_telegram_alerts,
@@ -134,6 +135,25 @@ def test_xlsx_import_when_optional_dependency_is_available(tmp_path):
     assert not errors and rows[0]["date"] == "2026-10-28" and rows[0]["sku"] == "SKU-X"
 
 
+def test_csv_custom_header_mapping_and_mapping_aware_idempotency(tmp_path):
+    path = tmp_path / "localized.csv"
+    path.write_text(
+        "День,Артикул,Продажи,Шт\n2026-10-28,SKU-X,1200,2\n", encoding="utf-8"
+    )
+    mapping = parse_column_mappings(
+        ["date=День", "sku=Артикул", "gross_sales=Продажи", "units=Шт"]
+    )
+    rows, errors = parse_csv(path, mapping)
+    assert errors == [] and rows[0]["gross_sales"] == "1200" and rows[0]["sku"] == "SKU-X"
+    db = connect(tmp_path / "seller.db")
+    assert import_csv(db, path, mapping)["accepted"] == 1
+    assert import_csv(db, path, mapping)["duplicate_batch"]
+    case_variant = {key: value.swapcase() for key, value in mapping.items()}
+    assert not import_csv(db, path, case_variant)["duplicate_batch"]  # Mapping is part of batch identity.
+    with pytest.raises(ValueError, match="mapped more than once"):
+        parse_column_mappings(["sku=Артикул", "sku=Код"])
+
+
 def test_invalid_row_and_inventory_alert_dry_run(tmp_path):
     rows, errors = parse_csv("fixtures/daily_sku.csv")
     assert rows and not errors
@@ -223,6 +243,8 @@ def test_cli_preview_import_dashboard_and_export_on_synthetic_fixture(tmp_path):
     dashboard_result = json.loads(cli("--db", str(database), "dashboard"))
     alpha = next(row for row in dashboard_result if row["sku"] == "SKU-ALPHA")
     assert alpha["metrics"]["contribution_margin"] == "5000"
+    history = json.loads(cli("--db", str(database), "imports"))
+    assert history[0]["accepted"] == 3 and history[0]["rejected"] == 0
 
     exported = tmp_path / "export.csv"
     cli("--db", str(database), "export", str(exported))

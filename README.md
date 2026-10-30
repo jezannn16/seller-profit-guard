@@ -72,6 +72,8 @@ ruff check .
 
 Tests include the synthetic CSV fixture, real CLI subprocess runs with a temporary database, duplicate import handling, alert dry-run behavior, and XLSX parsing when the optional dependency is installed. They make no marketplace or Telegram requests.
 
+Imports accept repeated `--map CANONICAL=HEADER` options on both `preview` and `import`, for example `--map date=День --map sku=Артикул --map gross_sales=Продажи --map units=Шт`. Canonical names include `date`, `sku`, `units`, `gross_sales`, `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, and `avg_daily_units`. `imports` prints local batch history with time and accepted/rejected counts. The chosen mapping is part of import identity.
+
 ## Optional Telegram delivery
 
 Telegram delivery is a real external message. It requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in a local `.env` file or secret manager; `.env` is ignored by Git. Never commit or paste credential values. Review the generated alert text and choose a private test chat before using `--send-telegram`:
