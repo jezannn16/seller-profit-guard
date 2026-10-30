@@ -61,6 +61,7 @@ inventory cover      = latest stock / latest average daily units
 ```
 
 Taxes, storage, payment costs, discounts, and other expenses must be included in an appropriate input before interpreting contribution margin. Inventory cover is a point-in-time estimate, not a demand forecast.
+CSV export prefixes formula-like SKU text with an apostrophe for spreadsheet safety; if such a SKU is re-imported, remove that export-only prefix first.
 
 ## Tests and CI
 
@@ -83,10 +84,10 @@ python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 alerts \
   --min-margin 6000 --min-stock-days 7 --send-telegram
 ```
 
-Sending is opt-in, uses one request per alert, and does not automatically retry ambiguous failures. `--commit-log` writes local cooldown entries and does not send messages. This repository has no Telegram live-send test.
+Sending is opt-in, uses one request per alert, and does not automatically retry ambiguous failures. `--commit-log` writes local cooldown entries and does not send messages. Partially accepted imports with rejected rows also produce a batch-specific alert; dry-run reports it without changing cooldown state. This repository has no Telegram live-send test.
 
 ## Data and scope
 
-There is no Wildberries or Ozon API adapter, marketplace synchronization, price editing, ad management, or stock updates. CSV data is stored locally and unencrypted; avoid sensitive exports in shared directories. Identical file imports are idempotent, while overlapping date/SKU rows are rejected rather than overwritten.
+There is no Wildberries or Ozon API adapter, marketplace synchronization, price editing, ad management, or stock updates. On POSIX systems the SQLite database and CSV export are restricted to the current user (mode 0600); contents remain unencrypted, so avoid sensitive exports in shared directories. Identical file imports are idempotent, while overlapping date/SKU rows are rejected rather than overwritten.
 
 See [demo steps](docs/demo.md) and the [synthetic CSV fixture](fixtures/daily_sku.csv).

@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sqlite3
 import sys
 import urllib.error
@@ -35,6 +36,12 @@ NUMERIC = (
 
 def connect(path: str | Path) -> sqlite3.Connection:
     db = sqlite3.connect(path)
+    if os.name == "posix" and str(path) != ":memory:":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            db.close()
+            raise RuntimeError("Could not restrict the database file to the current user") from None
     db.row_factory = sqlite3.Row
     db.executescript("""
     CREATE TABLE IF NOT EXISTS import_batches(id INTEGER PRIMARY KEY, source TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
@@ -311,7 +318,43 @@ def evaluate_alerts(
                     "INSERT INTO alert_log(alert_key,sent_at,mode) VALUES(?,?,?)",
                     (alert, now.isoformat(timespec="seconds"), "logged"),
                 )
+    # A batch with rejected rows is actionable even when its valid rows were imported.
+    # Key by immutable batch id so cooldowns do not merge separate uploads of the same file.
+    for batch in db.execute(
+        "SELECT id,source,rejected FROM import_batches WHERE rejected>0 ORDER BY id"
+    ):
+        alert = f"import_error:batch-{batch['id']}"
+        last = db.execute(
+            "SELECT sent_at FROM alert_log WHERE alert_key=? ORDER BY id DESC LIMIT 1", (alert,)
+        ).fetchone()
+        if last and (now - datetime.fromisoformat(last[0])).total_seconds() < cooldown_hours * 3600:
+            continue
+        messages.append(
+            f"Import batch #{batch['id']} from {Path(batch['source']).name} rejected {batch['rejected']} rows"
+        )
+        if not dry_run:
+            db.execute(
+                "INSERT INTO alert_log(alert_key,sent_at,mode) VALUES(?,?,?)",
+                (alert, now.isoformat(timespec="seconds"), "logged"),
+            )
     return messages
+
+
+def alert_key_for_message(message: str) -> str:
+    """Recover a stable cooldown key for either SKU or import-batch alert text."""
+    batch = re.match(r"Import batch #(\d+) from ", message)
+    if batch:
+        return f"import_error:batch-{batch.group(1)}"
+    identity, _, detail = message.partition(":")
+    if "contribution margin" in detail:
+        kind = "margin"
+    elif "stock cover" in detail:
+        kind = "stockout"
+    elif "ROAS" in detail:
+        kind = "roas"
+    else:
+        kind = "acos"
+    return f"{kind}:{identity}"
 
 
 def send_telegram_alerts(
@@ -323,15 +366,7 @@ def send_telegram_alerts(
     sent = 0
     failed = 0
     for message in messages:
-        sku = message.split(":", 1)[0]
-        if "contribution margin" in message:
-            kind = "margin"
-        elif "stock cover" in message:
-            kind = "stockout"
-        elif "ROAS" in message:
-            kind = "roas"
-        else:
-            kind = "acos"
+        alert_key = alert_key_for_message(message)
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         request = urllib.request.Request(
             url,
@@ -353,7 +388,7 @@ def send_telegram_alerts(
             failed += 1
         db.execute(
             "INSERT INTO alert_log(alert_key,sent_at,mode) VALUES(?,?,?)",
-            (f"{kind}:{sku}", datetime.now(UTC).isoformat(timespec="seconds"), outcome),
+            (alert_key, datetime.now(UTC).isoformat(timespec="seconds"), outcome),
         )
     return sent, failed
 
@@ -363,6 +398,23 @@ def serializable(item: dict[str, object]) -> dict[str, object]:
     result["metrics"] = {k: (str(v) if isinstance(v, Decimal) else v) for k, v in vars(item["metrics"]).items()}
     result["inventory_days"] = str(item["inventory_days"]) if item["inventory_days"] is not None else None
     return result
+
+
+def spreadsheet_safe_text(value: str) -> str:
+    """Neutralize formula-leading SKU values in CSV exports opened by spreadsheet apps."""
+    if value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def export_csv(db: sqlite3.Connection, path: str | Path) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "sku", *NUMERIC])
+        for row in db.execute("SELECT * FROM daily_sku ORDER BY date,sku"):
+            writer.writerow([row["date"], spreadsheet_safe_text(row["sku"]), *[row[k] for k in NUMERIC]])
+    if os.name == "posix":
+        os.chmod(path, 0o600)
 
 
 def main() -> int:
@@ -419,27 +471,13 @@ def main() -> int:
             if args.commit_log:
                 # This mode records a local preview only; it never sends external messages.
                 for a in alerts:
-                    sku = a.split(":", 1)[0]
-                    kind = (
-                        "margin"
-                        if "contribution margin" in a
-                        else "stockout"
-                        if "stock cover" in a
-                        else "roas"
-                        if "ROAS" in a
-                        else "acos"
-                    )
                     db.execute(
                         "INSERT INTO alert_log(alert_key,sent_at,mode) VALUES(?,?,?)",
-                        (f"{kind}:{sku}", datetime.now(UTC).isoformat(timespec="seconds"), "logged"),
+                        (alert_key_for_message(a), datetime.now(UTC).isoformat(timespec="seconds"), "logged"),
                     )
             db.commit()
         elif args.cmd == "export":
-            with open(args.file, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["date", "sku", *NUMERIC])
-                for row in db.execute("SELECT * FROM daily_sku ORDER BY date,sku"):
-                    writer.writerow([row["date"], row["sku"], *[row[k] for k in NUMERIC]])
+            export_csv(db, args.file)
         db.close()
         return 0
     except (ValueError, OSError, UnicodeError, InvalidOperation) as exc:

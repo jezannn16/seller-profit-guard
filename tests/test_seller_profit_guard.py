@@ -1,4 +1,7 @@
+import csv
 import json
+import os
+import stat
 import subprocess
 import sys
 from decimal import Decimal
@@ -11,6 +14,7 @@ from seller_profit_guard import (
     calculate,
     connect,
     evaluate_alerts,
+    export_csv,
     import_csv,
     parse_csv,
     parse_xlsx,
@@ -44,6 +48,34 @@ def test_zero_sales_has_no_divide_by_zero_return_rate(tmp_path):
     import_csv(db, path)
     metric = calculate(db.execute("select * from daily_sku where sku='SKU-ZERO'").fetchall())
     assert metric.net_sales == 0 and metric.return_rate is None
+
+
+def test_export_csv_neutralizes_formula_like_sku(tmp_path):
+    path = tmp_path / "formula.csv"
+    path.write_text(
+        "date,sku,units,gross_sales,returns,fees,logistics,ad_spend,cogs\n"
+        "2026-10-28,=HYPERLINK(\"https://example.invalid\"),1,100,0,0,0,0,10\n",
+        encoding="utf-8",
+    )
+    db = connect(tmp_path / "seller.db")
+    import_csv(db, path)
+    exported = tmp_path / "safe.csv"
+
+    export_csv(db, exported)
+
+    with exported.open(encoding="utf-8", newline="") as source:
+        rows = list(csv.DictReader(source))
+    assert rows[0]["sku"].startswith("'=HYPERLINK")
+    if os.name == "posix":
+        assert stat.S_IMODE(exported.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file mode check")
+def test_database_file_permissions_are_owner_only(tmp_path):
+    path = tmp_path / "private-seller.sqlite3"
+    db = connect(path)
+    db.close()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_import_is_idempotent_duplicate_rows_rejected(tmp_path):
@@ -114,6 +146,31 @@ def test_invalid_row_and_inventory_alert_dry_run(tmp_path):
     assert any("ROAS" in a for a in alerts)
     assert any("ACoS" in a for a in alerts)
     assert db.execute("select count(*) from alert_log").fetchone()[0] == 0
+
+
+def test_rejected_import_rows_raise_cooldown_logged_alert(tmp_path):
+    path = tmp_path / "mixed.csv"
+    path.write_text(
+        "date,sku,units,gross_sales,returns\n"
+        "2026-10-28,SKU-OK,1,100,0\n"
+        "2026-10-28,SKU-BAD,1,-10,0\n",
+        encoding="utf-8",
+    )
+    db = connect(tmp_path / "seller.db")
+    result = import_csv(db, path)
+    assert (result["accepted"], result["rejected"]) == (1, 1)
+
+    alerts = evaluate_alerts(db, Decimal(-100000), Decimal(0), dry_run=True)
+    assert alerts == [f"Import batch #1 from {path.name} rejected 1 rows"]
+    assert db.execute("select count(*) from alert_log").fetchone()[0] == 0
+
+    logged = evaluate_alerts(db, Decimal(-100000), Decimal(0), dry_run=False)
+    assert logged == alerts
+    assert tuple(db.execute("select alert_key, mode from alert_log").fetchone()) == (
+        "import_error:batch-1",
+        "logged",
+    )
+    assert evaluate_alerts(db, Decimal(-100000), Decimal(0), dry_run=True) == []
 
 
 def test_telegram_delivery_logs_without_retry_or_token_output(tmp_path):
