@@ -12,12 +12,12 @@
 
 | Area | Available now |
 | --- | --- |
-| Import | Preview and import CSV; optional XLSX support with `openpyxl` |
+| Import | Preview and import CSV; optional XLSX support with `openpyxl`; one row per day/SKU or explicit order-item rows |
 | Validation | Map case-insensitive headers; reject negative sales, costs, inventory, and duplicate date/SKU rows |
 | Economics | Calculate net sales, return rate, contribution margin, ROAS, and ACoS when inputs are complete |
 | Inventory | Estimate days of cover from supplied stock and average daily units |
 | Alerts | Margin/stock thresholds plus ROAS decline and ACoS growth across two periods; dry-run by default with configurable cooldown |
-| Storage | Append-only daily SKU rows in local SQLite; no marketplace account connection |
+| Storage | Local SQLite for products, daily SKU facts, observed cost/return/ad/inventory facts, optional identified orders, and import batches |
 
 Missing cost or returns inputs remain unknown where they affect a metric. The tool does not infer profit from revenue.
 
@@ -39,6 +39,7 @@ Run the included synthetic example:
 python seller_profit_guard.py preview fixtures/daily_sku.csv
 python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 import fixtures/daily_sku.csv
 python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 dashboard
+python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 facts
 python seller_profit_guard.py --db /tmp/seller-demo.sqlite3 alerts \
   --min-margin 6000 --min-stock-days 7 --min-roas 10
 ```
@@ -47,7 +48,9 @@ The fixture has three rows. SKU-ALPHA has 17,500 net sales and 5,000 contributio
 
 ## Input format
 
-One row per date and SKU. Required columns: `date` (`YYYY-MM-DD`), `sku`, `units`, and `gross_sales`. Optional columns: `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, and `avg_daily_units`. Monetary amounts accept decimal commas or dots. Rows with missing required cost inputs keep contribution margin unknown; missing `ad_sales` keeps ROAS and ACoS unknown.
+For aggregated reports, use one row per date and SKU. Required columns: `date` (`YYYY-MM-DD`), `sku`, `units`, and `gross_sales`. Optional observed columns are `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, and `avg_daily_units`. Optional `order_id` and `order_item_id` columns preserve order models only when the file actually supplies identifiers; `order_item_id` requires `order_id`. Repeated date/SKU rows are accepted only when each row has an explicit order ID, and are aggregated into daily metrics with Decimal arithmetic. A repeated stock snapshot must agree across those rows. Monetary amounts accept decimal commas or dots. Rows with missing required cost inputs keep contribution margin unknown; missing `ad_sales` keeps ROAS and ACoS unknown.
+
+Imports also populate normalized local facts: product first/last observed dates, return amount, ad spend/attributed sales, marketplace fees, logistics costs, and inventory snapshots. These are recorded only when their corresponding source cells are present. `facts` prints counts by model. Older databases are upgraded additively and backfilled from existing `daily_sku` rows only where the stored `missing_fields` and values show that a fact was observed. Order and order-item tables remain empty for legacy aggregated reports because order identities cannot be recovered from daily SKU totals.
 
 The formulas and assumptions are:
 
@@ -72,9 +75,9 @@ pytest -q
 ruff check .
 ```
 
-Tests include the synthetic CSV fixture, real CLI subprocess runs with a temporary database, duplicate import handling, alert dry-run behavior, and XLSX parsing when the optional dependency is installed. They make no marketplace or Telegram requests.
+Tests include the synthetic CSV fixture, real CLI subprocess runs with a temporary database, duplicate imports, additive legacy-schema migration, order-line aggregation using Decimal, observed-fact counts, alert dry-run behavior, and XLSX import when the optional dependency is installed. They make no marketplace or Telegram requests.
 
-Imports accept repeated `--map CANONICAL=HEADER` options on both `preview` and `import`, for example `--map date=День --map sku=Артикул --map gross_sales=Продажи --map units=Шт`. Canonical names include `date`, `sku`, `units`, `gross_sales`, `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, and `avg_daily_units`. `imports` prints local batch history with time and accepted/rejected counts. The chosen mapping is part of import identity.
+Imports accept repeated `--map CANONICAL=HEADER` options on both `preview` and `import`, for example `--map date=День --map sku=Артикул --map gross_sales=Продажи --map units=Шт`. Canonical names include `date`, `sku`, `units`, `gross_sales`, `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, `avg_daily_units`, `order_id`, and `order_item_id`. `imports` prints local batch history with time and accepted/rejected counts. The chosen mapping is part of import identity.
 
 Trend alerts compare each SKU's last `--trend-days` calendar days in the imported data with the preceding equal-length period (default: 7 days). They are emitted only when both periods have enough inputs to calculate the metric and ROAS decreased or ACoS increased. Set `--cooldown-hours` (default: 24) to control local alert suppression. For example, `alerts --trend-days 14 --cooldown-hours 48` compares two consecutive 14-day windows and suppresses repeated alerts for 48 hours.
 

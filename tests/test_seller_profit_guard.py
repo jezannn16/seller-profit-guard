@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -11,11 +12,13 @@ from unittest.mock import patch
 
 import pytest
 
+import seller_profit_guard as seller_module
 from seller_profit_guard import (
     calculate,
     connect,
     evaluate_alerts,
     export_csv,
+    fact_summary,
     import_csv,
     parse_column_mappings,
     parse_csv,
@@ -88,6 +91,128 @@ def test_import_is_idempotent_duplicate_rows_rejected(tmp_path):
     assert second["duplicate_batch"] and second["accepted"] == 0
 
 
+def test_import_persists_only_observed_normalized_daily_facts(tmp_path):
+    db = connect(tmp_path / "seller.db")
+    import_csv(db, "fixtures/daily_sku.csv")
+    assert db.execute("select count(*) from products").fetchone()[0] == 2
+    assert db.execute("select count(*) from daily_returns").fetchone()[0] == 3
+    assert db.execute("select count(*) from advertising_daily").fetchone()[0] == 3
+    assert db.execute("select count(*) from marketplace_fees_daily").fetchone()[0] == 3
+    assert db.execute("select count(*) from logistics_costs_daily").fetchone()[0] == 3
+    assert db.execute("select count(*) from inventory_snapshots").fetchone()[0] == 3
+    assert db.execute("select count(*) from orders").fetchone()[0] == 0
+    assert db.execute("select count(*) from order_items").fetchone()[0] == 0
+    assert sum((Decimal(row[0]) for row in db.execute("select amount from daily_returns")), Decimal(0)) == Decimal(500)
+
+
+def test_legacy_database_migration_backfills_only_known_values(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    old = sqlite3.connect(path)
+    old.executescript("""
+      CREATE TABLE import_batches(id INTEGER PRIMARY KEY,source TEXT,content_hash TEXT,imported_at TEXT,accepted INTEGER,rejected INTEGER);
+      CREATE TABLE daily_sku(date TEXT,sku TEXT,units TEXT,gross_sales TEXT,returns TEXT,fees TEXT,logistics TEXT,
+        ad_spend TEXT,ad_sales TEXT,cogs TEXT,missing_fields TEXT,stock TEXT,avg_daily_units TEXT,batch_id INTEGER,
+        PRIMARY KEY(date,sku));
+      CREATE TABLE alert_log(id INTEGER PRIMARY KEY,alert_key TEXT,sent_at TEXT,mode TEXT);
+      INSERT INTO import_batches VALUES(1,'legacy.csv','legacy-hash','2026-01-01T00:00:00+00:00',1,0);
+      INSERT INTO daily_sku VALUES('2026-01-01','OLD-SKU','1','100','0','10','5','2',NULL,NULL,
+        'returns,ad_sales,cogs','8','2',1);
+    """)
+    old.close()
+    db = connect(path)
+    assert db.execute("select sku,first_seen,last_seen from products").fetchone()[:] == (
+        "OLD-SKU", "2026-01-01", "2026-01-01"
+    )
+    assert db.execute("select amount from marketplace_fees_daily").fetchone()[0] == "10"
+    assert db.execute("select amount from logistics_costs_daily").fetchone()[0] == "5"
+    ad = db.execute("select spend,attributed_sales from advertising_daily").fetchone()
+    assert tuple(ad) == ("2", None)
+    assert db.execute("select count(*) from daily_returns").fetchone()[0] == 0
+    assert db.execute("select count(*) from inventory_snapshots").fetchone()[0] == 1
+    assert db.execute("select count(*) from orders").fetchone()[0] == 0
+    db.close()
+    db = connect(path)
+    assert db.execute("select count(*) from marketplace_fees_daily").fetchone()[0] == 1
+    assert db.execute("select count(*) from products").fetchone()[0] == 1
+
+
+def test_order_line_csv_creates_orders_only_from_explicit_ids_and_aggregates_with_decimal(tmp_path):
+    day = date.today().isoformat()
+    source = tmp_path / "orders.csv"
+    source.write_text(
+        "date,sku,units,gross_sales,returns,fees,logistics,ad_spend,ad_sales,cogs,stock,avg_daily_units,order_id,order_item_id\n"
+        f"{day},SKU-X,1,10.1,0.1,0.1,0.1,0.1,1.1,3.3,20,2,ORDER-1,LINE-1\n"
+        f"{day},SKU-X,2,20.2,0.2,0.2,0.2,0.2,2.2,6.6,20,2,ORDER-2,LINE-2\n",
+        encoding="utf-8",
+    )
+    db = connect(tmp_path / "seller.db")
+    result = import_csv(db, source)
+    assert result["accepted"] == 2 and result["rejected"] == 0
+    metric = calculate(db.execute("select * from daily_sku where sku='SKU-X'").fetchall())
+    assert metric.gross_sales == Decimal("30.3")
+    assert metric.returns == Decimal("0.3") and metric.net_sales == Decimal("30.0")
+    assert metric.fees == Decimal("0.3") and metric.logistics == Decimal("0.3")
+    assert metric.ad_spend == Decimal("0.3") and metric.ad_sales == Decimal("3.3")
+    assert metric.cogs == Decimal("9.9") and metric.contribution_margin == Decimal("19.2")
+    assert db.execute("select count(*) from orders").fetchone()[0] == 2
+    assert db.execute("select count(*) from order_items").fetchone()[0] == 2
+    assert [tuple(row) for row in db.execute("select units,gross_sales from order_items order by order_id")] == [
+        ("1", "10.1"), ("2", "20.2")
+    ]
+
+
+def test_order_item_ids_require_explicit_orders_and_repeated_order_rows_are_detected(tmp_path):
+    source = tmp_path / "orders.csv"
+    source.write_text(
+        "date,sku,units,gross_sales,order_item_id\n2026-10-28,SKU-X,1,10,LINE-1\n", encoding="utf-8"
+    )
+    rows, errors = parse_csv(source)
+    assert rows == [] and "requires order_id" in errors[0]["error"]
+
+
+def test_conflicting_order_identity_rejects_all_its_rows_without_partial_facts(tmp_path):
+    source = tmp_path / "conflict.csv"
+    source.write_text(
+        "date,sku,units,gross_sales,order_id\n"
+        "2026-10-28,SKU-X,1,10,ORDER-1\n"
+        "2026-10-29,SKU-Y,1,20,ORDER-1\n",
+        encoding="utf-8",
+    )
+    db = connect(tmp_path / "seller.db")
+    imported = import_csv(db, source)
+    assert imported["accepted"] == 0 and imported["rejected"] == 2
+    assert db.execute("select count(*) from daily_sku").fetchone()[0] == 0
+    assert db.execute("select count(*) from orders").fetchone()[0] == 0
+    assert db.execute("select count(*) from products").fetchone()[0] == 0
+
+
+def test_unexpected_failure_rolls_back_entire_batch_without_backfill(tmp_path, monkeypatch):
+    source = tmp_path / "batch.csv"
+    source.write_text(
+        "date,sku,units,gross_sales,returns,fees,logistics,ad_spend,cogs\n"
+        "2026-10-28,SKU-A,1,10,1,1,1,1,1\n"
+        "2026-10-29,SKU-B,1,20,2,2,2,2,2\n",
+        encoding="utf-8",
+    )
+    db = connect(tmp_path / "seller.db")
+    original = seller_module._record_observed_facts
+    calls = 0
+
+    def fail_on_second_group(connection, batch, daily, rows):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise sqlite3.OperationalError("injected write failure")
+        original(connection, batch, daily, rows)
+
+    monkeypatch.setattr(seller_module, "_record_observed_facts", fail_on_second_group)
+    with pytest.raises(sqlite3.OperationalError, match="injected write failure"):
+        import_csv(db, source)
+
+    for table in ("import_batches", "daily_sku", "products", "daily_returns", "marketplace_fees_daily"):
+        assert db.execute(f"select count(*) from {table}").fetchone()[0] == 0
+
+
 def test_row_level_errors_cover_bad_date_negative_stock_and_duplicate(tmp_path):
     path = tmp_path / "bad.csv"
     path.write_text(
@@ -137,12 +262,21 @@ def test_xlsx_import_when_optional_dependency_is_available(tmp_path):
     path = tmp_path / "report.xlsx"
     workbook = openpyxl.Workbook()
     sheet = workbook.active
-    sheet.append(["date", "sku", "units", "gross_sales"])
-    sheet.append([date(2026, 10, 28), "SKU-X", 2, 1200])
+    sheet.append([
+        "date", "sku", "units", "gross_sales", "returns", "fees", "logistics", "ad_spend", "ad_sales",
+        "cogs", "stock", "avg_daily_units", "order_id",
+    ])
+    sheet.append([date(2026, 10, 28), "SKU-X", 2, 1200, 0, 10, 20, 30, 900, 400, 18, 2, "XLSX-ORDER"])
     workbook.save(path)
     workbook.close()
     rows, errors = parse_xlsx(path)
     assert not errors and rows[0]["date"] == "2026-10-28" and rows[0]["sku"] == "SKU-X"
+    db = connect(tmp_path / "xlsx.db")
+    assert import_csv(db, path)["accepted"] == 1
+    facts = fact_summary(db)
+    assert facts["products"] == facts["orders"] == facts["order_items"] == 1
+    assert facts["daily_returns"] == facts["advertising_daily"] == facts["marketplace_fees_daily"] == 1
+    assert facts["logistics_costs_daily"] == facts["inventory_snapshots"] == 1
 
 
 def test_csv_custom_header_mapping_and_mapping_aware_idempotency(tmp_path):
@@ -273,6 +407,8 @@ def test_cli_preview_import_dashboard_and_export_on_synthetic_fixture(tmp_path):
 
     preview_result = json.loads(cli("preview", "fixtures/daily_sku.csv"))
     assert (preview_result["valid_rows"], preview_result["rejected_rows"]) == (3, 0)
+    assert "_source_row" not in preview_result["sample"][0]
+    assert "_source_row" not in preview_result["sample"][0]
 
     imported = json.loads(cli("--db", str(database), "import", "fixtures/daily_sku.csv"))
     assert imported == {"duplicate_batch": False, "accepted": 3, "rejected": 0}
@@ -282,6 +418,10 @@ def test_cli_preview_import_dashboard_and_export_on_synthetic_fixture(tmp_path):
     assert alpha["metrics"]["contribution_margin"] == "5000"
     history = json.loads(cli("--db", str(database), "imports"))
     assert history[0]["accepted"] == 3 and history[0]["rejected"] == 0
+    facts = json.loads(cli("--db", str(database), "facts"))
+    assert facts["products"] == 2 and facts["order_items"] == facts["orders"] == 0
+    facts = json.loads(cli("--db", str(database), "facts"))
+    assert facts["products"] == 2 and facts["order_items"] == facts["orders"] == 0
 
     exported = tmp_path / "export.csv"
     cli("--db", str(database), "export", str(exported))
