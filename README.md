@@ -16,7 +16,7 @@
 | Validation | Map case-insensitive headers; reject negative sales, costs, inventory, and duplicate date/SKU rows |
 | Economics | Calculate net sales, return rate, contribution margin, ROAS, and ACoS when inputs are complete |
 | Inventory | Estimate days of cover from supplied stock and average daily units |
-| Alerts | Dry-run by default; optional local cooldown log or explicit Telegram delivery |
+| Alerts | Margin/stock thresholds plus ROAS decline and ACoS growth across two periods; dry-run by default with configurable cooldown |
 | Storage | Append-only daily SKU rows in local SQLite; no marketplace account connection |
 
 Missing cost or returns inputs remain unknown where they affect a metric. The tool does not infer profit from revenue.
@@ -58,6 +58,8 @@ return rate          = returns / gross sales (unknown when returns are missing o
 ROAS                 = ad-attributed sales / ad spend
 ACoS                 = ad spend / ad-attributed sales
 inventory cover      = latest stock / latest average daily units
+ROAS trend alert     = current period ROAS < preceding equal-length period ROAS
+ACoS trend alert     = current period ACoS > preceding equal-length period ACoS
 ```
 
 Taxes, storage, payment costs, discounts, and other expenses must be included in an appropriate input before interpreting contribution margin. Inventory cover is a point-in-time estimate, not a demand forecast.
@@ -73,6 +75,8 @@ ruff check .
 Tests include the synthetic CSV fixture, real CLI subprocess runs with a temporary database, duplicate import handling, alert dry-run behavior, and XLSX parsing when the optional dependency is installed. They make no marketplace or Telegram requests.
 
 Imports accept repeated `--map CANONICAL=HEADER` options on both `preview` and `import`, for example `--map date=День --map sku=Артикул --map gross_sales=Продажи --map units=Шт`. Canonical names include `date`, `sku`, `units`, `gross_sales`, `returns`, `fees`, `logistics`, `ad_spend`, `ad_sales`, `cogs`, `stock`, and `avg_daily_units`. `imports` prints local batch history with time and accepted/rejected counts. The chosen mapping is part of import identity.
+
+Trend alerts compare each SKU's last `--trend-days` calendar days in the imported data with the preceding equal-length period (default: 7 days). They are emitted only when both periods have enough inputs to calculate the metric and ROAS decreased or ACoS increased. Set `--cooldown-hours` (default: 24) to control local alert suppression. For example, `alerts --trend-days 14 --cooldown-hours 48` compares two consecutive 14-day windows and suppresses repeated alerts for 48 hours.
 
 ## Optional Telegram delivery
 

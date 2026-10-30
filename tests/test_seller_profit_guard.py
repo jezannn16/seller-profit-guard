@@ -4,6 +4,7 @@ import os
 import stat
 import subprocess
 import sys
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -177,6 +178,33 @@ def test_invalid_row_and_inventory_alert_dry_run(tmp_path):
     assert db.execute("select count(*) from alert_log").fetchone()[0] == 0
 
 
+def test_roas_decline_and_acos_growth_compare_consecutive_periods(tmp_path):
+    path = tmp_path / "trend.csv"
+    start = date.today() - timedelta(days=13)
+    lines = ["date,sku,units,gross_sales,returns,fees,logistics,ad_spend,ad_sales,cogs"]
+    for day in range(14):
+        ad_sales = 100 if day < 7 else 50
+        lines.append(f"{start + timedelta(days=day)},SKU-TREND,1,100,0,0,0,10,{ad_sales},1")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    db = connect(tmp_path / "trend.db")
+    import_csv(db, path)
+
+    alerts = evaluate_alerts(db, Decimal(-999999), Decimal(0), trend_days=7)
+    assert alerts == [
+        "SKU-TREND: ROAS declined from 10.00 to 5.00 across consecutive 7-day periods",
+        "SKU-TREND: ACoS increased from 10.00% to 20.00% across consecutive 7-day periods",
+    ]
+    combined = evaluate_alerts(db, Decimal(-999999), Decimal(0), minimum_roas=Decimal(8),
+        maximum_acos=Decimal("0.12"), trend_days=7)
+    assert sum("ROAS" in alert for alert in combined) == 1
+    assert sum("ACoS" in alert for alert in combined) == 1
+    logged = evaluate_alerts(db, Decimal(-999999), Decimal(0), dry_run=False, cooldown_hours=48, trend_days=7)
+    assert logged == alerts
+    assert evaluate_alerts(db, Decimal(-999999), Decimal(0), cooldown_hours=48, trend_days=7) == []
+    with pytest.raises(ValueError, match="Cooldown"):
+        evaluate_alerts(db, Decimal(0), Decimal(0), cooldown_hours=-1)
+
+
 def test_rejected_import_rows_raise_cooldown_logged_alert(tmp_path):
     path = tmp_path / "mixed.csv"
     path.write_text(
@@ -258,3 +286,19 @@ def test_cli_preview_import_dashboard_and_export_on_synthetic_fixture(tmp_path):
     exported = tmp_path / "export.csv"
     cli("--db", str(database), "export", str(exported))
     assert exported.read_text(encoding="utf-8").count("SKU-") == 3
+
+
+def test_alert_cli_applies_configured_cooldown(tmp_path):
+    project = Path(__file__).resolve().parents[1]
+    database = tmp_path / "cooldown.sqlite3"
+    subprocess.run([sys.executable, "seller_profit_guard.py", "--db", str(database), "import", "fixtures/daily_sku.csv"],
+        cwd=project, check=True, capture_output=True, text=True)
+    db = connect(database)
+    db.execute("INSERT INTO alert_log(alert_key,sent_at,mode) VALUES(?,?,?)",
+        ("margin:SKU-ALPHA", datetime.now().astimezone().isoformat(), "sent"))
+    db.commit()
+    db.close()
+    output = subprocess.run([sys.executable, "seller_profit_guard.py", "--db", str(database), "alerts",
+        "--min-margin", "6000", "--min-stock-days", "0", "--cooldown-hours", "1000", "--trend-days", "7"],
+        cwd=project, check=True, capture_output=True, text=True).stdout
+    assert output.strip() == "No alerts"

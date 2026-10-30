@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -329,7 +329,12 @@ def evaluate_alerts(
     dry_run: bool = True,
     minimum_roas: Decimal | None = None,
     maximum_acos: Decimal | None = None,
+    trend_days: int = 7,
 ) -> list[str]:
+    if cooldown_hours < 0:
+        raise ValueError("Cooldown hours cannot be negative")
+    if trend_days < 1:
+        raise ValueError("Trend period must be at least one day")
     messages = []
     now = datetime.now(UTC)
     for item in dashboard(db):
@@ -344,8 +349,32 @@ def evaluate_alerts(
             candidates.append(("roas", f"{sku}: ROAS {m.roas:.2f} below {minimum_roas}"))
         if maximum_acos is not None and m.acos is not None and m.acos > maximum_acos:
             candidates.append(("acos", f"{sku}: ACoS {m.acos:.2%} above {maximum_acos:.2%}"))
+        all_rows = db.execute("SELECT * FROM daily_sku WHERE sku=? ORDER BY date", (sku,)).fetchall()
+        anchor = max(date.fromisoformat(row["date"]) for row in all_rows)
+        current_start = anchor - timedelta(days=trend_days - 1)
+        previous_start = anchor - timedelta(days=2 * trend_days - 1)
+        previous_rows = [row for row in all_rows if previous_start <= date.fromisoformat(row["date"]) < current_start]
+        current_rows = [row for row in all_rows if current_start <= date.fromisoformat(row["date"]) <= anchor]
+        if previous_rows and current_rows:
+            previous_metrics, current_metrics = calculate(previous_rows), calculate(current_rows)
+            if (previous_metrics.roas is not None and current_metrics.roas is not None
+                    and current_metrics.roas < previous_metrics.roas):
+                candidates.append(("roas", (
+                    f"{sku}: ROAS declined from {previous_metrics.roas:.2f} "
+                    f"to {current_metrics.roas:.2f} across consecutive {trend_days}-day periods"
+                )))
+            if (previous_metrics.acos is not None and current_metrics.acos is not None
+                    and current_metrics.acos > previous_metrics.acos):
+                candidates.append(("acos", (
+                    f"{sku}: ACoS increased from {previous_metrics.acos:.2%} "
+                    f"to {current_metrics.acos:.2%} across consecutive {trend_days}-day periods"
+                )))
+        seen_candidate_keys: set[str] = set()
         for key, msg in candidates:
             alert = f"{key}:{sku}"
+            if alert in seen_candidate_keys:
+                continue
+            seen_candidate_keys.add(alert)
             last = db.execute(
                 "SELECT sent_at FROM alert_log WHERE alert_key=? ORDER BY id DESC LIMIT 1", (alert,)
             ).fetchone()
@@ -473,6 +502,8 @@ def main() -> int:
     x.add_argument("--min-stock-days", default="7")
     x.add_argument("--min-roas")
     x.add_argument("--max-acos")
+    x.add_argument("--cooldown-hours", type=int, default=24)
+    x.add_argument("--trend-days", type=int, default=7)
     group = x.add_mutually_exclusive_group()
     group.add_argument("--commit-log", action="store_true")
     group.add_argument("--send-telegram", action="store_true")
@@ -498,9 +529,11 @@ def main() -> int:
                 db,
                 Decimal(args.min_margin),
                 Decimal(args.min_stock_days),
+                cooldown_hours=args.cooldown_hours,
                 dry_run=True,
                 minimum_roas=Decimal(args.min_roas) if args.min_roas is not None else None,
                 maximum_acos=Decimal(args.max_acos) if args.max_acos is not None else None,
+                trend_days=args.trend_days,
             )
             if args.send_telegram:
                 sent, failed = send_telegram_alerts(
