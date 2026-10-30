@@ -105,6 +105,15 @@ def test_row_level_errors_cover_bad_date_negative_stock_and_duplicate(tmp_path):
     assert "duplicate" in errors[2]["error"]
 
 
+def test_ambiguous_duplicate_headers_fail_before_mapping(tmp_path):
+    path = tmp_path / "ambiguous.csv"
+    path.write_text(
+        "date,sku,units,gross_sales,Gross_Sales\n2026-10-28,SKU-X,1,100,200\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="duplicate column headers"):
+        parse_csv(path)
+
+
 @pytest.mark.parametrize("column,value", [("gross_sales", "-100"), ("fees", "-1"), ("ad_spend", "-2"), ("cogs", "-3")])
 def test_negative_revenue_and_cost_inputs_are_rejected(tmp_path, column, value):
     headers = ["date", "sku", "units", "gross_sales", "fees", "ad_spend", "cogs"]
@@ -149,7 +158,7 @@ def test_csv_custom_header_mapping_and_mapping_aware_idempotency(tmp_path):
     assert import_csv(db, path, mapping)["accepted"] == 1
     assert import_csv(db, path, mapping)["duplicate_batch"]
     case_variant = {key: value.swapcase() for key, value in mapping.items()}
-    assert not import_csv(db, path, case_variant)["duplicate_batch"]  # Mapping is part of batch identity.
+    assert import_csv(db, path, case_variant)["duplicate_batch"]  # Header matching and batch identity are case-insensitive.
     with pytest.raises(ValueError, match="mapped more than once"):
         parse_column_mappings(["sku=Артикул", "sku=Код"])
 

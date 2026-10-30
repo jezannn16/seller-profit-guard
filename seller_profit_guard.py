@@ -86,7 +86,10 @@ def parse_column_mappings(values: list[str] | None) -> dict[str, str]:
 def _validate_rows(
     fieldnames: list[str], records, column_map: dict[str, str] | None = None
 ) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
-    source_headers = {name.strip().casefold(): name for name in fieldnames if name}
+    normalized_headers = [name.strip().casefold() for name in fieldnames if name and name.strip()]
+    if len(normalized_headers) != len(set(normalized_headers)):
+        raise ValueError("Source file has duplicate column headers; rename the columns before import")
+    source_headers = {name.strip().casefold(): name for name in fieldnames if name and name.strip()}
     mapping = {key: source_headers[key.casefold()] for key in (set(NUMERIC) | {"date", "sku"}) if key.casefold() in source_headers}
     for canonical, source in (column_map or {}).items():
         actual = source_headers.get(source.casefold())
@@ -206,7 +209,10 @@ def import_csv(
     db: sqlite3.Connection, path: str | Path, column_map: dict[str, str] | None = None
 ) -> dict[str, int | bool]:
     raw = Path(path).read_bytes()
-    mapping_bytes = json.dumps(column_map or {}, sort_keys=True, separators=(",", ":")).encode()
+    normalized_map = {
+        canonical.strip().casefold(): source.strip().casefold() for canonical, source in (column_map or {}).items()
+    }
+    mapping_bytes = json.dumps(normalized_map, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(raw + b"\0" + mapping_bytes).hexdigest()
     if db.execute("SELECT 1 FROM import_batches WHERE content_hash=?", (digest,)).fetchone():
         return {"duplicate_batch": True, "accepted": 0, "rejected": 0}
